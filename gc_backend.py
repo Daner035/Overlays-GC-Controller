@@ -20,6 +20,8 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT_P1 = 49152
 UDP_PORT_P2 = 49153
 
+RECONNECT_DELAY_SEC = 1.0
+LOOP_INTERVAL_SEC = 0.006  # Ritmo objetivo aproximado por ciclo (~166 Hz máx.)
 DEBUG_PORTS = False
 
 TRIGGER_MIN = 35
@@ -44,20 +46,24 @@ def clamp(val, low, high):
   return max(low, min(high, val))
 
 
+def neutral_state(status=0x00):
+  return {
+      "status": status,
+      "botones": [],
+      "stick": (128, 128),
+      "c_stick": (128, 128),
+      "l_analog": 0,
+      "r_analog": 0,
+  }
+
+
 def parse_gc_port(port_bytes):
   if len(port_bytes) < 9:
     return None
 
   status = port_bytes[0]
   if status == 0x00:
-    return {
-        "status": status,
-        "botones": [],
-        "stick": (128, 128),
-        "c_stick": (128, 128),
-        "l_analog": 0,
-        "r_analog": 0,
-    }
+    return neutral_state(status=0x00)
 
   b1 = port_bytes[1]
   b2 = port_bytes[2]
@@ -206,6 +212,7 @@ class GameCubeUSBBackend:
     self._last_p1 = None
     self._last_p2 = None
     self._debug_tick = 0
+    self._waiting_logged = False
 
     if broadcast_udp:
       self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -238,6 +245,7 @@ class GameCubeUSBBackend:
     return None, None, None
 
   def connect(self):
+    self.close()
     backend = usb.backend.libusb1.get_backend(
         find_library=libusb_package.find_library
     )
@@ -267,22 +275,34 @@ class GameCubeUSBBackend:
     usb.util.claim_interface(self.dev, self.intf_num)
     self.claimed = True
     self.ep_out.write([0x13], timeout=1000)
+    self._waiting_logged = False
+    print("Adaptador WUP-028 conectado y listo.")
+
+  def _emit_player_state(self, player_num, state, vpad, target):
+    if vpad is not None:
+      vpad.send_state(state)
+    if self._udp_sock is not None:
+      packet = {"player": player_num, **state}
+      payload = json.dumps(packet).encode("utf-8")
+      self._udp_sock.sendto(payload, target)
+
+  def _reset_players_to_neutral(self):
+    neutral = neutral_state(status=0x00)
+    self._emit_player_state(1, neutral, self.vpad_p1, self._target_p1)
+    self._emit_player_state(2, neutral, self.vpad_p2, self._target_p2)
+    self._last_p1 = None
+    self._last_p2 = None
 
   def _process_player(self, raw_slice, player_num, last_state, vpad, target):
     parsed = parse_gc_port(raw_slice)
     if parsed and has_meaningful_change(last_state, parsed, deadzone=1):
-      if vpad is not None:
-        vpad.send_state(parsed)
-      if self._udp_sock is not None:
-        packet = {"player": player_num, **parsed}
-        payload = json.dumps(packet).encode("utf-8")
-        self._udp_sock.sendto(payload, target)
+      self._emit_player_state(player_num, parsed, vpad, target)
       return parsed
     return last_state
 
   def read_ports(self):
     if not self.claimed or self.ep_in is None:
-      return
+      return False
     try:
       data = self.ep_in.read(self.ep_in.wMaxPacketSize, timeout=15)
       if data and len(data) >= 19:
@@ -299,8 +319,14 @@ class GameCubeUSBBackend:
         self._last_p2 = self._process_player(
             data[10:19], 2, self._last_p2, self.vpad_p2, self._target_p2
         )
+      return True
     except usb.core.USBTimeoutError:
-      pass
+      return True
+    except usb.core.USBError as exc:
+      print(f"Conexión USB interrumpida ({exc}). Intentando reconectar...")
+      self.close()
+      self._reset_players_to_neutral()
+      return False
 
   def close(self):
     if self.claimed and self.dev is not None and self.intf_num is not None:
@@ -308,10 +334,15 @@ class GameCubeUSBBackend:
         usb.util.release_interface(self.dev, self.intf_num)
       except usb.core.USBError:
         pass
-      self.claimed = False
+    self.claimed = False
+    self.dev = None
+    self.intf_num = None
+    self.ep_out = None
+    self.ep_in = None
 
   def shutdown(self):
     self.close()
+    self._reset_players_to_neutral()
     if self.vpad_p1 is not None:
       self.vpad_p1.close()
     if self.vpad_p2 is not None:
@@ -325,11 +356,28 @@ if __name__ == "__main__":
   bridge = GameCubeUSBBackend(broadcast_udp=True)
   print(f"Mandos virtuales activos: {bool(bridge.vpad_p1 and bridge.vpad_p1.enabled)}")
   try:
-    bridge.connect()
-    print("Leyendo WUP-028 (Puertos 1 y 2) y enviando a mandos virtuales + UDP...")
     while True:
-      bridge.read_ports()
-      time.sleep(0.006)
+      cycle_start = time.perf_counter()
+
+      if not bridge.claimed:
+        try:
+          bridge.connect()
+        except (RuntimeError, usb.core.USBError) as exc:
+          if not bridge._waiting_logged:
+            print(f"Esperando adaptador WUP-028: {exc}")
+            bridge._waiting_logged = True
+          time.sleep(RECONNECT_DELAY_SEC)
+          continue
+
+      ok = bridge.read_ports()
+      if not ok:
+        time.sleep(RECONNECT_DELAY_SEC)
+        continue
+
+      elapsed = time.perf_counter() - cycle_start
+      remaining = LOOP_INTERVAL_SEC - elapsed
+      if remaining > 0:
+        time.sleep(remaining)
   except KeyboardInterrupt:
     pass
   finally:

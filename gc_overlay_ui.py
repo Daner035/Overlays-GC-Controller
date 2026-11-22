@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import json
+from pathlib import Path
 import socket
 import tkinter as tk
 
@@ -9,12 +10,44 @@ SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 
-# Ajusta este valor (ej. 0.85 = 85%, 0.80 = 80%, 0.90 = 90%)
+# Ajusta este valor (ej. 0.75 = 75%, 0.70 = 70%, 0.85 = 85%)
 SCALE = 0.75
+
+POS_FILE = Path(__file__).with_name("overlay_pos.json")
 
 
 def clamp(val, low, high):
   return max(low, min(high, val))
+
+
+def load_saved_positions():
+  if not POS_FILE.exists():
+    return {}
+  try:
+    data = json.loads(POS_FILE.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+  except Exception:
+    return {}
+
+
+def save_positions(overlays):
+  payload = {}
+  for ov in overlays:
+    if ov._closed:
+      continue
+    try:
+      payload[str(ov.player)] = {
+          "x": int(ov.win.winfo_x()),
+          "y": int(ov.win.winfo_y()),
+      }
+    except Exception:
+      pass
+  if not payload:
+    return
+  try:
+    POS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+  except Exception:
+    pass
 
 
 class GameCubeSquareOverlay:
@@ -28,12 +61,14 @@ class GameCubeSquareOverlay:
       x: int = 40,
       y: int = 40,
       scale: float = SCALE,
+      on_request_close=None,
   ):
     self.win = win
     self.app_root = app_root
     self.player = player
     self.port = port
     self.scale = scale
+    self._on_request_close = on_request_close
 
     self.win.title(f"GC Input Overlay P{player}")
     self.win.attributes("-topmost", True)
@@ -54,8 +89,8 @@ class GameCubeSquareOverlay:
 
     self.win.bind("<ButtonPress-1>", self._start_drag)
     self.win.bind("<B1-Motion>", self._do_drag)
-    self.win.bind("<Button-3>", lambda _e: self.app_root.destroy())
-    self.win.bind("<Escape>", lambda _e: self.app_root.destroy())
+    self.win.bind("<Button-3>", self._handle_close_shortcut)
+    self.win.bind("<Escape>", self._handle_close_shortcut)
 
     self.canvas = tk.Canvas(
         win,
@@ -81,8 +116,18 @@ class GameCubeSquareOverlay:
     return max(1, int(round(val * self.scale)))
 
   def _font(self, size: int, bold: bool = False):
-    fsize = max(5, int(round(size * self.scale)))
+    fsize = max(4, int(round(size * self.scale)))
     return ("Consolas", fsize, "bold") if bold else ("Consolas", fsize)
+
+  def _handle_close_shortcut(self, _event=None):
+    if callable(self._on_request_close):
+      self._on_request_close()
+    else:
+      self.close()
+      try:
+        self.app_root.destroy()
+      except tk.TclError:
+        pass
 
   def _force_topmost(self):
     if self._closed:
@@ -354,6 +399,16 @@ class GameCubeSquareOverlay:
       pass
 
 
+def _resolve_pos(saved, player_key: str, default_x: int, default_y: int):
+  entry = saved.get(player_key)
+  if isinstance(entry, dict) and "x" in entry and "y" in entry:
+    try:
+      return int(entry["x"]), int(entry["y"])
+    except (TypeError, ValueError):
+      pass
+  return default_x, default_y
+
+
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="GC Input Overlay")
   parser.add_argument(
@@ -369,16 +424,18 @@ if __name__ == "__main__":
       "--scale",
       type=float,
       default=SCALE,
-      help="Escala visual (ej. 0.85 para hacerlo más pequeño)",
+      help="Escala visual (ej. 0.75 para hacerlo más pequeño)",
   )
   args = parser.parse_args()
 
   root = tk.Tk()
   root.withdraw()
 
+  saved_pos = load_saved_positions()
   overlays = []
 
   def shutdown_all():
+    save_positions(overlays)
     for ov in overlays:
       ov.close()
     try:
@@ -390,53 +447,66 @@ if __name__ == "__main__":
 
   if args.player == 1:
     p1_port = args.port if args.port else 49152
+    px, py = _resolve_pos(saved_pos, "1", args.x, args.y)
     overlays.append(
         GameCubeSquareOverlay(
             root,
             root,
             player=1,
             port=p1_port,
-            x=args.x,
-            y=args.y,
+            x=px,
+            y=py,
             scale=args.scale,
+            on_request_close=shutdown_all,
         )
     )
   elif args.player == 2:
     p2_port = args.port if args.port else 49153
+    px, py = _resolve_pos(saved_pos, "2", args.x, args.y)
     overlays.append(
         GameCubeSquareOverlay(
             root,
             root,
             player=2,
             port=p2_port,
-            x=args.x,
-            y=args.y,
+            x=px,
+            y=py,
             scale=args.scale,
+            on_request_close=shutdown_all,
         )
     )
   else:
+    p1_x, p1_y = _resolve_pos(saved_pos, "1", args.x, args.y)
+    fallback_p2_y = p1_y + max(1, int(round(120 * args.scale))) + max(
+        6, int(round(12 * args.scale))
+    )
+    p2_x, p2_y = _resolve_pos(saved_pos, "2", p1_x, fallback_p2_y)
+
     ov1 = GameCubeSquareOverlay(
         tk.Toplevel(root),
         root,
         player=1,
         port=49152,
-        x=args.x,
-        y=args.y,
+        x=p1_x,
+        y=p1_y,
         scale=args.scale,
+        on_request_close=shutdown_all,
     )
     ov2 = GameCubeSquareOverlay(
         tk.Toplevel(root),
         root,
         player=2,
         port=49153,
-        x=args.x,
-        y=args.y + ov1.height + max(6, int(round(12 * args.scale))),
+        x=p2_x,
+        y=p2_y,
         scale=args.scale,
+        on_request_close=shutdown_all,
     )
     overlays.extend([ov1, ov2])
 
   try:
     root.mainloop()
   finally:
+    save_positions(overlays)
     for ov in overlays:
       ov.close()
