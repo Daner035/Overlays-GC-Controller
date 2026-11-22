@@ -50,7 +50,7 @@ def parse_gc_port(p1):
   b2 = p1[2]
 
   botones = []
-  # Ajusta estas máscaras según lo que veas al pulsar cada botón en tu control
+  # Byte 1: botones principales y cruceta
   if b1 & 0x01:
     botones.append("A")
   if b1 & 0x02:
@@ -68,6 +68,7 @@ def parse_gc_port(p1):
   if b1 & 0x80:
     botones.append("D-Up")
 
+  # Byte 2: Start, Z, R, L y bits sin detección en este mando
   if b2 & 0x01:
     botones.append("Start")
   if b2 & 0x02:
@@ -77,11 +78,11 @@ def parse_gc_port(p1):
   if b2 & 0x08:
     botones.append("L")
   if b2 & 0x10:
-    botones.append("Z")
+    botones.append("no detecta (0x10)")
   if b2 & 0x20:
-    botones.append("R")
+    botones.append("no detecta (0x20)")
   if b2 & 0x40:
-    botones.append("L")
+    botones.append("no detecta (0x40)")
   if b2 & 0x80:
     botones.append("b2_0x80")
 
@@ -157,8 +158,7 @@ def main():
         f" {hex(ep_in.bEndpointAddress)})."
     )
     print(
-        "Pulsa un botón a la vez para ver qué bit enciende. Presiona 'q' para"
-        " salir..."
+        "Mueve el control y presiona botones. Presiona 'q' para detener..."
     )
 
     last_state = None
