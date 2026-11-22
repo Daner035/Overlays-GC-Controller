@@ -1,10 +1,27 @@
+import json
+import socket
+import time
 import libusb_package
 import usb.backend.libusb1
 import usb.core
 import usb.util
 
+try:
+  import vgamepad as vg
+
+  HAS_VGAMEPAD = True
+except Exception:
+  vg = None
+  HAS_VGAMEPAD = False
+
 VID = 0x057E
 PID = 0x0337
+UDP_HOST = "127.0.0.1"
+UDP_PORT = 49152
+
+
+def clamp(val, low, high):
+  return max(low, min(high, val))
 
 
 def active_bits(byte_val):
@@ -80,9 +97,78 @@ def has_meaningful_change(prev, curr, deadzone=2):
   return False
 
 
+class VirtualGamepadBridge:
+  """Crea un mando virtual Xbox 360 temporal (ViGEmBus) mientras el proceso viva."""
+
+  def __init__(self):
+    self.enabled = HAS_VGAMEPAD
+    self.pad = vg.VX360Gamepad() if HAS_VGAMEPAD else None
+
+  def send_state(self, state):
+    if not self.enabled or self.pad is None:
+      return
+
+    btns = set(state["botones"])
+
+    # Botones AB y XY corregidos para coincidir con el mando de GameCube
+    button_map = {
+        "A": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+        "B": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
+        "X": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
+        "Y": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+        "Start": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
+        "Z": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
+        "D-Up": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
+        "D-Down": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
+        "D-Left": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
+        "D-Right": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
+    }
+
+    for gc_btn, x_btn in button_map.items():
+      if gc_btn in btns:
+        self.pad.press_button(button=x_btn)
+      else:
+        self.pad.release_button(button=x_btn)
+
+    # Sticks analógicos
+    sx, sy = state["stick"]
+    lx = int(clamp((sx - 128) / 95.0, -1.0, 1.0) * 32767)
+    ly = int(clamp((sy - 128) / 95.0, -1.0, 1.0) * 32767)
+    self.pad.left_joystick(x_value=lx, y_value=ly)
+
+    cx, cy = state["c_stick"]
+    rx = int(clamp((cx - 128) / 95.0, -1.0, 1.0) * 32767)
+    ry = int(clamp((cy - 128) / 95.0, -1.0, 1.0) * 32767)
+    self.pad.right_joystick(x_value=rx, y_value=ry)
+
+    # Recorrido calibrado de gatillos analógicos L y R
+    TRIGGER_MIN = 35   # Sube este número si el gatillo marca solo en reposo
+    TRIGGER_MAX = 220  # Baja o sube este número según el tope antes del clic
+
+    span = max(1, TRIGGER_MAX - TRIGGER_MIN)
+    l_val = int(clamp((state["l_analog"] - TRIGGER_MIN) / span, 0.0, 1.0) * 255)
+    r_val = int(clamp((state["r_analog"] - TRIGGER_MIN) / span, 0.0, 1.0) * 255)
+
+    if "L" in btns:
+      l_val = 255
+    if "R" in btns:
+      r_val = 255
+
+    self.pad.left_trigger(value=l_val)
+    self.pad.right_trigger(value=r_val)
+
+    self.pad.update()
+
+  def close(self):
+    if self.pad is not None:
+      self.pad.reset()
+      self.pad.update()
+      self.pad = None
+
+
 class GameCubeUSBBackend:
 
-  def __init__(self, vid=VID, pid=PID):
+  def __init__(self, vid=VID, pid=PID, broadcast_udp=True):
     self.vid = vid
     self.pid = pid
     self.dev = None
@@ -90,6 +176,10 @@ class GameCubeUSBBackend:
     self.ep_out = None
     self.ep_in = None
     self.claimed = False
+    self.vpad = VirtualGamepadBridge() if broadcast_udp else None
+    self._udp_sock = None
+    if broadcast_udp:
+      self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
   def _find_endpoints(self):
     try:
@@ -155,7 +245,14 @@ class GameCubeUSBBackend:
     try:
       data = self.ep_in.read(self.ep_in.wMaxPacketSize, timeout=15)
       if data and len(data) >= 10:
-        return parse_gc_port(list(data[1:10]))
+        parsed = parse_gc_port(list(data[1:10]))
+        if parsed:
+          if self.vpad is not None:
+            self.vpad.send_state(parsed)
+          if self._udp_sock is not None:
+            payload = json.dumps(parsed).encode("utf-8")
+            self._udp_sock.sendto(payload, (UDP_HOST, UDP_PORT))
+        return parsed
     except usb.core.USBTimeoutError:
       pass
     return None
@@ -167,3 +264,26 @@ class GameCubeUSBBackend:
       except usb.core.USBError:
         pass
       self.claimed = False
+
+  def shutdown(self):
+    self.close()
+    if self.vpad is not None:
+      self.vpad.close()
+    if self._udp_sock is not None:
+      self._udp_sock.close()
+      self._udp_sock = None
+
+
+if __name__ == "__main__":
+  bridge = GameCubeUSBBackend(broadcast_udp=True)
+  print(f"Mando virtual activo: {bool(bridge.vpad and bridge.vpad.enabled)}")
+  try:
+    bridge.connect()
+    print("Leyendo WUP-028 y enviando a mando virtual + UDP...")
+    while True:
+      bridge.read_port1()
+      time.sleep(0.006)
+  except KeyboardInterrupt:
+    pass
+  finally:
+    bridge.shutdown()
