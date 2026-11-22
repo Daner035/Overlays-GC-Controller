@@ -1,0 +1,21 @@
+# Byte-compiled / cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build de PyInstaller
+build/
+*.spec
+
+# Posición local de los overlays
+overlay_pos.json
+
+# Build / temporales de C++ / Visual Studio (si aplica en Overlay_vk_dll)
+Overlay_vk_dll/x64/
+Overlay_vk_dll/Debug/
+Overlay_vk_dll/Release/
+*.obj
+*.ilk
+*.pdb
+*.tlog
+*.lastbuildstate
