@@ -1,8 +1,8 @@
+import argparse
 import ctypes
 import json
 import socket
 import tkinter as tk
-from gc_backend import UDP_HOST, UDP_PORT
 
 HWND_TOPMOST = -1
 SWP_NOMOVE = 0x0002
@@ -16,9 +16,19 @@ def clamp(val, low, high):
 
 class GameCubeSquareOverlay:
 
-  def __init__(self, root: tk.Tk):
+  def __init__(
+      self,
+      root: tk.Tk,
+      player: int = 1,
+      port: int = 49152,
+      x: int = 40,
+      y: int = 40,
+  ):
     self.root = root
-    self.root.title("GC Input Overlay")
+    self.player = player
+    self.port = port
+
+    self.root.title(f"GC Input Overlay P{player}")
     self.root.attributes("-topmost", True)
     self.root.overrideredirect(True)
     self.root.configure(bg="#000000")
@@ -26,7 +36,7 @@ class GameCubeSquareOverlay:
 
     self.width = 255
     self.height = 120
-    self.root.geometry(f"{self.width}x{self.height}+40+40")
+    self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
 
     self._drag_x = 0
     self._drag_y = 0
@@ -54,7 +64,7 @@ class GameCubeSquareOverlay:
     self._force_topmost()
 
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    self.sock.bind((UDP_HOST, UDP_PORT))
+    self.sock.bind(("127.0.0.1", self.port))
     self.sock.setblocking(False)
 
     self._poll_loop()
@@ -164,7 +174,12 @@ class GameCubeSquareOverlay:
     c.create_text(149, 51, text="S", fill="#ffffff", font=("Consolas", 6, "bold"))
 
     self.status_text = c.create_text(
-        10, 113, text="Esperando puente...", fill="#aaaaaa", font=("Consolas", 6), anchor="w"
+        10,
+        113,
+        text=f"P{self.player} esperando UDP...",
+        fill="#aaaaaa",
+        font=("Consolas", 6),
+        anchor="w",
     )
 
   def _update_visuals(self, state):
@@ -236,7 +251,9 @@ class GameCubeSquareOverlay:
       self._last_raw = latest
       try:
         state = json.loads(latest.decode("utf-8"))
-        self.canvas.itemconfig(self.status_text, text="P1 LIVE", fill="#00e59b")
+        self.canvas.itemconfig(
+            self.status_text, text=f"P{self.player} LIVE", fill="#00e59b"
+        )
         self._update_visuals(state)
       except Exception:
         pass
@@ -252,6 +269,15 @@ class GameCubeSquareOverlay:
 
 
 if __name__ == "__main__":
+  parser = argparse.ArgumentParser(description="GC Input Overlay")
+  parser.add_argument("--player", type=int, default=1, help="Número de jugador (1 o 2)")
+  parser.add_argument("--port", type=int, default=49152, help="Puerto UDP local")
+  parser.add_argument("--x", type=int, default=40, help="Posición inicial X")
+  parser.add_argument("--y", type=int, default=40, help="Posición inicial Y")
+  args = parser.parse_args()
+
   root = tk.Tk()
-  app = GameCubeSquareOverlay(root)
+  app = GameCubeSquareOverlay(
+      root, player=args.player, port=args.port, x=args.x, y=args.y
+  )
   root.mainloop()

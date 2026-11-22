@@ -17,7 +17,10 @@ except Exception:
 VID = 0x057E
 PID = 0x0337
 UDP_HOST = "127.0.0.1"
-UDP_PORT = 49152
+UDP_PORT_P1 = 49152
+UDP_PORT_P2 = 49153
+
+DEBUG_PORTS = True  # Ponlo en True para ver en consola qué llega en P1 y P2
 
 TRIGGER_MIN = 35
 TRIGGER_MAX = 220
@@ -41,13 +44,11 @@ def clamp(val, low, high):
   return max(low, min(high, val))
 
 
-def parse_gc_port(p1):
-  if len(p1) < 9:
+def parse_gc_port(port_bytes):
+  if len(port_bytes) < 9:
     return None
 
-  status = p1[0]
-  # En el adaptador WUP-028, el byte 0 indica si hay mando conectado en el puerto.
-  # Si no hay mando conectado (status == 0x00), devolvemos estado neutral.
+  status = port_bytes[0]
   if status == 0x00:
     return {
         "status": status,
@@ -58,8 +59,8 @@ def parse_gc_port(p1):
         "r_analog": 0,
     }
 
-  b1 = p1[1]
-  b2 = p1[2]
+  b1 = port_bytes[1]
+  b2 = port_bytes[2]
 
   botones = []
   if b1 & 0x01:
@@ -91,10 +92,10 @@ def parse_gc_port(p1):
   return {
       "status": status,
       "botones": botones,
-      "stick": (p1[3], p1[4]),
-      "c_stick": (p1[5], p1[6]),
-      "l_analog": p1[7],
-      "r_analog": p1[8],
+      "stick": (port_bytes[3], port_bytes[4]),
+      "c_stick": (port_bytes[5], port_bytes[6]),
+      "l_analog": port_bytes[7],
+      "r_analog": port_bytes[8],
   }
 
 
@@ -156,8 +157,8 @@ class VirtualGamepadBridge:
     self.pad.left_joystick(x_value=lx, y_value=ly)
 
     cx, cy = state["c_stick"]
-    rx = int(clamp((cx - 128) / 95.0, -1.0, 1.0) * 32767)
-    ry = int(clamp((cy - 128) / 95.0, -1.0, 1.0) * 32767)
+    rx = int(clamp((cx - 128) / 80.0, -1.0, 1.0) * 32767)
+    ry = int(clamp((cy - 128) / 80.0, -1.0, 1.0) * 32767)
     self.pad.right_joystick(x_value=rx, y_value=ry)
 
     l_val = int(
@@ -194,10 +195,18 @@ class GameCubeUSBBackend:
     self.ep_out = None
     self.ep_in = None
     self.claimed = False
-    self.vpad = VirtualGamepadBridge() if broadcast_udp else None
+
+    self.vpad_p1 = VirtualGamepadBridge() if broadcast_udp else None
+    self.vpad_p2 = VirtualGamepadBridge() if broadcast_udp else None
+
     self._udp_sock = None
-    self._udp_target = (UDP_HOST, UDP_PORT)
-    self._last_parsed = None
+    self._target_p1 = (UDP_HOST, UDP_PORT_P1)
+    self._target_p2 = (UDP_HOST, UDP_PORT_P2)
+
+    self._last_p1 = None
+    self._last_p2 = None
+    self._debug_tick = 0
+
     if broadcast_udp:
       self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -259,24 +268,39 @@ class GameCubeUSBBackend:
     self.claimed = True
     self.ep_out.write([0x13], timeout=1000)
 
-  def read_port1(self):
+  def _process_player(self, raw_slice, player_num, last_state, vpad, target):
+    parsed = parse_gc_port(raw_slice)
+    if parsed and has_meaningful_change(last_state, parsed, deadzone=1):
+      if vpad is not None:
+        vpad.send_state(parsed)
+      if self._udp_sock is not None:
+        packet = {"player": player_num, **parsed}
+        payload = json.dumps(packet).encode("utf-8")
+        self._udp_sock.sendto(payload, target)
+      return parsed
+    return last_state
+
+  def read_ports(self):
     if not self.claimed or self.ep_in is None:
-      return None
+      return
     try:
       data = self.ep_in.read(self.ep_in.wMaxPacketSize, timeout=15)
-      if data and len(data) >= 10:
-        parsed = parse_gc_port(data[1:10])
-        if parsed and has_meaningful_change(self._last_parsed, parsed, deadzone=1):
-          self._last_parsed = parsed
-          if self.vpad is not None:
-            self.vpad.send_state(parsed)
-          if self._udp_sock is not None:
-            payload = json.dumps(parsed).encode("utf-8")
-            self._udp_sock.sendto(payload, self._udp_target)
-        return parsed
+      if data and len(data) >= 19:
+        if DEBUG_PORTS:
+          self._debug_tick += 1
+          if self._debug_tick % 60 == 0:
+            print(
+                f"len={len(data)} | P1={parse_gc_port(data[1:10])} | P2={parse_gc_port(data[10:19])}"
+            )
+
+        self._last_p1 = self._process_player(
+            data[1:10], 1, self._last_p1, self.vpad_p1, self._target_p1
+        )
+        self._last_p2 = self._process_player(
+            data[10:19], 2, self._last_p2, self.vpad_p2, self._target_p2
+        )
     except usb.core.USBTimeoutError:
       pass
-    return None
 
   def close(self):
     if self.claimed and self.dev is not None and self.intf_num is not None:
@@ -288,8 +312,10 @@ class GameCubeUSBBackend:
 
   def shutdown(self):
     self.close()
-    if self.vpad is not None:
-      self.vpad.close()
+    if self.vpad_p1 is not None:
+      self.vpad_p1.close()
+    if self.vpad_p2 is not None:
+      self.vpad_p2.close()
     if self._udp_sock is not None:
       self._udp_sock.close()
       self._udp_sock = None
@@ -297,12 +323,12 @@ class GameCubeUSBBackend:
 
 if __name__ == "__main__":
   bridge = GameCubeUSBBackend(broadcast_udp=True)
-  print(f"Mando virtual activo: {bool(bridge.vpad and bridge.vpad.enabled)}")
+  print(f"Mandos virtuales activos: {bool(bridge.vpad_p1 and bridge.vpad_p1.enabled)}")
   try:
     bridge.connect()
-    print("Leyendo WUP-028 y enviando a mando virtual + UDP...")
+    print("Leyendo WUP-028 (Puertos 1 y 2) y enviando a mandos virtuales + UDP...")
     while True:
-      bridge.read_port1()
+      bridge.read_ports()
       time.sleep(0.006)
   except KeyboardInterrupt:
     pass
