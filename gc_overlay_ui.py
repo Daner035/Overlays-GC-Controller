@@ -1,7 +1,13 @@
+import ctypes
 import json
 import socket
 import tkinter as tk
 from gc_backend import UDP_HOST, UDP_PORT
+
+HWND_TOPMOST = -1
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOACTIVATE = 0x0010
 
 
 def clamp(val, low, high):
@@ -24,6 +30,10 @@ class GameCubeSquareOverlay:
 
     self._drag_x = 0
     self._drag_y = 0
+    self._topmost_tick = 0
+    self._last_raw = None
+    self._last_state = None
+
     self.root.bind("<ButtonPress-1>", self._start_drag)
     self.root.bind("<B1-Motion>", self._do_drag)
     self.root.bind("<Button-3>", lambda _e: self.on_close())
@@ -41,12 +51,32 @@ class GameCubeSquareOverlay:
     self.canvas.bind("<B1-Motion>", self._do_drag)
 
     self._draw_layout()
+    self._force_topmost()
 
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.sock.bind((UDP_HOST, UDP_PORT))
     self.sock.setblocking(False)
 
     self._poll_loop()
+
+  def _force_topmost(self):
+    self.root.attributes("-topmost", True)
+    try:
+      hwnd = (
+          ctypes.windll.user32.GetParent(self.root.winfo_id())
+          or self.root.winfo_id()
+      )
+      ctypes.windll.user32.SetWindowPos(
+          hwnd,
+          HWND_TOPMOST,
+          0,
+          0,
+          0,
+          0,
+          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+      )
+    except Exception:
+      pass
 
   def _start_drag(self, event):
     self._drag_x = event.x
@@ -72,25 +102,42 @@ class GameCubeSquareOverlay:
     c.create_rectangle(
         self.ls_x0, self.ls_y0, self.ls_x1, self.ls_y1, outline="#ffffff", width=2
     )
-    ls_mid_x = (self.ls_x0 + self.ls_x1) // 2
-    ls_mid_y = (self.ls_y0 + self.ls_y1) // 2
+    self.ls_mid_x = (self.ls_x0 + self.ls_x1) // 2
+    self.ls_mid_y = (self.ls_y0 + self.ls_y1) // 2
+    self.max_ls = ((self.ls_x1 - self.ls_x0) // 2) - 5
     c.create_rectangle(
-        ls_mid_x - 1, ls_mid_y - 1, ls_mid_x + 1, ls_mid_y + 1, fill="#888888", width=0
+        self.ls_mid_x - 1,
+        self.ls_mid_y - 1,
+        self.ls_mid_x + 1,
+        self.ls_mid_y + 1,
+        fill="#888888",
+        width=0,
     )
     self.ls_box = c.create_rectangle(
-        ls_mid_x - 4, ls_mid_y - 4, ls_mid_x + 4, ls_mid_y + 4,
-        fill="#ffffff", outline="#ffffff", width=1
+        self.ls_mid_x - 4,
+        self.ls_mid_y - 4,
+        self.ls_mid_x + 4,
+        self.ls_mid_y + 4,
+        fill="#ffffff",
+        outline="#ffffff",
+        width=1,
     )
 
     self.cs_x0, self.cs_y0, self.cs_x1, self.cs_y1 = 78, 25, 124, 71
     c.create_rectangle(
         self.cs_x0, self.cs_y0, self.cs_x1, self.cs_y1, outline="#ffe600", width=2
     )
-    cs_mid_x = (self.cs_x0 + self.cs_x1) // 2
-    cs_mid_y = (self.cs_y0 + self.cs_y1) // 2
+    self.cs_mid_x = (self.cs_x0 + self.cs_x1) // 2
+    self.cs_mid_y = (self.cs_y0 + self.cs_y1) // 2
+    self.max_cs = ((self.cs_x1 - self.cs_x0) // 2) - 7
     self.cs_box = c.create_rectangle(
-        cs_mid_x - 5, cs_mid_y - 5, cs_mid_x + 5, cs_mid_y + 5,
-        fill="#ffe600", outline="#ffe600", width=1
+        self.cs_mid_x - 5,
+        self.cs_mid_y - 5,
+        self.cs_mid_x + 5,
+        self.cs_mid_y + 5,
+        fill="#ffe600",
+        outline="#ffe600",
+        width=1,
     )
 
     self.dpad_rects = {
@@ -121,27 +168,36 @@ class GameCubeSquareOverlay:
     )
 
   def _update_visuals(self, state):
-    c = self.canvas
-    btns = set(state["botones"])
+    key = (
+        tuple(state.get("botones", ())),
+        tuple(state.get("stick", (128, 128))),
+        tuple(state.get("c_stick", (128, 128))),
+        state.get("l_analog", 0),
+        state.get("r_analog", 0),
+    )
+    if key == self._last_state:
+      return
+    self._last_state = key
 
-    sx, sy = state["stick"]
+    c = self.canvas
+    btns = set(key[0])
+
+    sx, sy = key[1]
     nx = clamp((sx - 128) / 95.0, -1.0, 1.0)
     ny = clamp((128 - sy) / 95.0, -1.0, 1.0)
-    max_ls = ((self.ls_x1 - self.ls_x0) // 2) - 5
-    cx_ls = ((self.ls_x0 + self.ls_x1) // 2) + nx * max_ls
-    cy_ls = ((self.ls_y0 + self.ls_y1) // 2) + ny * max_ls
+    cx_ls = self.ls_mid_x + nx * self.max_ls
+    cy_ls = self.ls_mid_y + ny * self.max_ls
     c.coords(self.ls_box, cx_ls - 4, cy_ls - 4, cx_ls + 4, cy_ls + 4)
 
-    cx_val, cy_val = state["c_stick"]
-    cnx = clamp((cx_val - 128) / 95.0, -1.0, 1.0)
-    cny = clamp((128 - cy_val) / 95.0, -1.0, 1.0)
-    max_cs = ((self.cs_x1 - self.cs_x0) // 2) - 7
-    cx_cs = ((self.cs_x0 + self.cs_x1) // 2) + cnx * max_cs
-    cy_cs = ((self.cs_y0 + self.cs_y1) // 2) + cny * max_cs
+    cx_val, cy_val = key[2]
+    cnx = clamp((cx_val - 128) / 80.0, -1.0, 1.0)
+    cny = clamp((128 - cy_val) / 80.0, -1.0, 1.0)
+    cx_cs = self.cs_mid_x + cnx * self.max_cs
+    cy_cs = self.cs_mid_y + cny * self.max_cs
     c.coords(self.cs_box, cx_cs - 5, cy_cs - 5, cx_cs + 5, cy_cs + 5)
 
-    l_ratio = clamp((state["l_analog"] - 35) / 185.0, 0.0, 1.0)
-    r_ratio = clamp((state["r_analog"] - 35) / 185.0, 0.0, 1.0)
+    l_ratio = clamp((key[3] - 35) / 185.0, 0.0, 1.0)
+    r_ratio = clamp((key[4] - 35) / 185.0, 0.0, 1.0)
     c.coords(self.l_bar, 11, 9, 11 + int(47 * l_ratio), 14)
     c.coords(self.r_bar, 133 - int(47 * r_ratio), 9, 133, 14)
     c.itemconfig(self.l_click, fill="#ffffff" if "L" in btns else "")
@@ -162,6 +218,10 @@ class GameCubeSquareOverlay:
       c.itemconfig(rect_id, fill="#00e59b" if direction in btns else "")
 
   def _poll_loop(self):
+    self._topmost_tick += 1
+    if self._topmost_tick % 300 == 0:
+      self._force_topmost()
+
     latest = None
     while True:
       try:
@@ -172,7 +232,8 @@ class GameCubeSquareOverlay:
       except OSError:
         break
 
-    if latest is not None:
+    if latest is not None and latest != self._last_raw:
+      self._last_raw = latest
       try:
         state = json.loads(latest.decode("utf-8"))
         self.canvas.itemconfig(self.status_text, text="P1 LIVE", fill="#00e59b")
@@ -180,7 +241,7 @@ class GameCubeSquareOverlay:
       except Exception:
         pass
 
-    self.root.after(8, self._poll_loop)
+    self.root.after(16, self._poll_loop)
 
   def on_close(self):
     try:

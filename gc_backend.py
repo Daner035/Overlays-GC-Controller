@@ -19,18 +19,44 @@ PID = 0x0337
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 49152
 
+TRIGGER_MIN = 35
+TRIGGER_MAX = 220
+TRIGGER_SPAN = max(1, TRIGGER_MAX - TRIGGER_MIN)
+
+GC_TO_XUSB_BUTTONS = (
+    ("A", "XUSB_GAMEPAD_B"),
+    ("B", "XUSB_GAMEPAD_A"),
+    ("X", "XUSB_GAMEPAD_Y"),
+    ("Y", "XUSB_GAMEPAD_X"),
+    ("Start", "XUSB_GAMEPAD_START"),
+    ("Z", "XUSB_GAMEPAD_RIGHT_SHOULDER"),
+    ("D-Up", "XUSB_GAMEPAD_DPAD_UP"),
+    ("D-Down", "XUSB_GAMEPAD_DPAD_DOWN"),
+    ("D-Left", "XUSB_GAMEPAD_DPAD_LEFT"),
+    ("D-Right", "XUSB_GAMEPAD_DPAD_RIGHT"),
+)
+
 
 def clamp(val, low, high):
   return max(low, min(high, val))
 
 
-def active_bits(byte_val):
-  return [f"0x{1 << i:02x}" for i in range(8) if byte_val & (1 << i)]
-
-
 def parse_gc_port(p1):
   if len(p1) < 9:
     return None
+
+  status = p1[0]
+  # En el adaptador WUP-028, el byte 0 indica si hay mando conectado en el puerto.
+  # Si no hay mando conectado (status == 0x00), devolvemos estado neutral.
+  if status == 0x00:
+    return {
+        "status": status,
+        "botones": [],
+        "stick": (128, 128),
+        "c_stick": (128, 128),
+        "l_analog": 0,
+        "r_analog": 0,
+    }
 
   b1 = p1[1]
   b2 = p1[2]
@@ -63,10 +89,8 @@ def parse_gc_port(p1):
     botones.append("L")
 
   return {
-      "status": p1[0],
+      "status": status,
       "botones": botones,
-      "b1_bits": active_bits(b1),
-      "b2_bits": active_bits(b2),
       "stick": (p1[3], p1[4]),
       "c_stick": (p1[5], p1[6]),
       "l_analog": p1[7],
@@ -74,8 +98,10 @@ def parse_gc_port(p1):
   }
 
 
-def has_meaningful_change(prev, curr, deadzone=2):
+def has_meaningful_change(prev, curr, deadzone=1):
   if prev is None:
+    return True
+  if prev.get("status") != curr.get("status"):
     return True
   if prev["botones"] != curr["botones"]:
     return True
@@ -103,6 +129,14 @@ class VirtualGamepadBridge:
   def __init__(self):
     self.enabled = HAS_VGAMEPAD
     self.pad = vg.VX360Gamepad() if HAS_VGAMEPAD else None
+    self._button_map = (
+        tuple(
+            (gc_btn, getattr(vg.XUSB_BUTTON, x_btn_name))
+            for gc_btn, x_btn_name in GC_TO_XUSB_BUTTONS
+        )
+        if HAS_VGAMEPAD
+        else ()
+    )
 
   def send_state(self, state):
     if not self.enabled or self.pad is None:
@@ -110,27 +144,12 @@ class VirtualGamepadBridge:
 
     btns = set(state["botones"])
 
-    # Botones AB y XY corregidos para coincidir con el mando de GameCube
-    button_map = {
-        "A": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-        "B": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-        "X": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
-        "Y": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
-        "Start": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
-        "Z": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
-        "D-Up": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
-        "D-Down": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
-        "D-Left": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
-        "D-Right": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
-    }
-
-    for gc_btn, x_btn in button_map.items():
+    for gc_btn, x_btn in self._button_map:
       if gc_btn in btns:
         self.pad.press_button(button=x_btn)
       else:
         self.pad.release_button(button=x_btn)
 
-    # Sticks analógicos
     sx, sy = state["stick"]
     lx = int(clamp((sx - 128) / 95.0, -1.0, 1.0) * 32767)
     ly = int(clamp((sy - 128) / 95.0, -1.0, 1.0) * 32767)
@@ -141,13 +160,12 @@ class VirtualGamepadBridge:
     ry = int(clamp((cy - 128) / 95.0, -1.0, 1.0) * 32767)
     self.pad.right_joystick(x_value=rx, y_value=ry)
 
-    # Recorrido calibrado de gatillos analógicos L y R
-    TRIGGER_MIN = 35   # Sube este número si el gatillo marca solo en reposo
-    TRIGGER_MAX = 220  # Baja o sube este número según el tope antes del clic
-
-    span = max(1, TRIGGER_MAX - TRIGGER_MIN)
-    l_val = int(clamp((state["l_analog"] - TRIGGER_MIN) / span, 0.0, 1.0) * 255)
-    r_val = int(clamp((state["r_analog"] - TRIGGER_MIN) / span, 0.0, 1.0) * 255)
+    l_val = int(
+        clamp((state["l_analog"] - TRIGGER_MIN) / TRIGGER_SPAN, 0.0, 1.0) * 255
+    )
+    r_val = int(
+        clamp((state["r_analog"] - TRIGGER_MIN) / TRIGGER_SPAN, 0.0, 1.0) * 255
+    )
 
     if "L" in btns:
       l_val = 255
@@ -178,6 +196,8 @@ class GameCubeUSBBackend:
     self.claimed = False
     self.vpad = VirtualGamepadBridge() if broadcast_udp else None
     self._udp_sock = None
+    self._udp_target = (UDP_HOST, UDP_PORT)
+    self._last_parsed = None
     if broadcast_udp:
       self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -245,13 +265,14 @@ class GameCubeUSBBackend:
     try:
       data = self.ep_in.read(self.ep_in.wMaxPacketSize, timeout=15)
       if data and len(data) >= 10:
-        parsed = parse_gc_port(list(data[1:10]))
-        if parsed:
+        parsed = parse_gc_port(data[1:10])
+        if parsed and has_meaningful_change(self._last_parsed, parsed, deadzone=1):
+          self._last_parsed = parsed
           if self.vpad is not None:
             self.vpad.send_state(parsed)
           if self._udp_sock is not None:
             payload = json.dumps(parsed).encode("utf-8")
-            self._udp_sock.sendto(payload, (UDP_HOST, UDP_PORT))
+            self._udp_sock.sendto(payload, self._udp_target)
         return parsed
     except usb.core.USBTimeoutError:
       pass
