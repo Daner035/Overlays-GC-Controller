@@ -20,7 +20,7 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT_P1 = 49152
 UDP_PORT_P2 = 49153
 
-DEBUG_PORTS = True  # Ponlo en True para ver en consola qué llega en P1 y P2
+DEBUG_PORTS = False
 
 TRIGGER_MIN = 35
 TRIGGER_MAX = 220
