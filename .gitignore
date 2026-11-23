@@ -6,6 +6,12 @@ __pycache__/
 # Build de PyInstaller
 build/
 *.spec
+__pycache__/
+*.py[cod]
+build/
+dist/
+Overlay_vk_dll/test_overlay.dll
+Overlay_vk_dll/third_party/
 
 # Posición local de los overlays
 overlay_pos.json
@@ -19,3 +25,6 @@ Overlay_vk_dll/Release/
 *.pdb
 *.tlog
 *.lastbuildstate
+
+# Casos de prueba
+Pruebas/

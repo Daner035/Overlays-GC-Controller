@@ -1,18 +1,23 @@
 {
-    "configurations": [
-        {
-            "name": "Win32",
-            "includePath": [
-                "D:\\Archivos de programas\\msys64\\ucrt64\\include"
-            ],
-            "defines": [
-                "_DEBUG",
-                "UNICODE",
-                "_UNICODE"
-            ],
-            "compilerPath": "D:\\Archivos de programas\\msys64\\ucrt64\\bin\\g++.exe",
-            "intelliSenseMode": "windows-gcc-x64"
-        }
-    ],
-    "version": 4
+  "configurations": [
+    {
+      "name": "UCRT64",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/Overlay_vk_dll",
+        "C:/VulkanSDK/1.4.363.1/Include",
+        "${workspaceFolder}/Overlay_vk_dll/third_party/imgui",
+        "${workspaceFolder}/Overlay_vk_dll/third_party/imgui/backends",
+        "${workspaceFolder}/Overlay_vk_dll/third_party/minhook/include"
+      ],
+      "defines": [
+        "WIN32_LEAN_AND_MEAN"
+      ],
+      "compilerPath": "D:/Archivos de programas/msys64/ucrt64/bin/g++.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-gcc-x64"
+    }
+  ],
+  "version": 4
 }
