@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Overlay VK DLL (UCRT64)",
+      "type": "shell",
+      "command": "D:\\Archivos de programas\\msys64\\ucrt64\\bin\\g++.exe",
+      "args": [
+        "-std=c++17",
+        "-m64",
+        "-shared",
+        "-O2",
+        "-IOverlay_vk_dll",
+        "Overlay_vk_dll/dllmain.cpp",
+        "-o",
+        "Overlay_vk_dll/test_overlay.dll",
+        "-lws2_32",
+        "-static-libgcc",
+        "-static-libstdc++"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "D:\\Archivos de programas\\msys64\\ucrt64\\bin;${env:PATH}"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
